@@ -276,7 +276,12 @@ for trial in range(start,args.ntrain):
     if not args.nolineest:
         assert "dew.png" not in fname,"don't dewarp already dewarped lines"
         network.lnorm.measure(amax(line)-line)
-        line = network.lnorm.normalize(line,cval=amax(line))
+        try:
+            line = network.lnorm.normalize(line,cval=amax(line))
+        except ValueError:
+            print "Normalization error...skipping sample"
+            continue
+
     else:
         assert "dew.png" in fname,"input must already be dewarped"
 
