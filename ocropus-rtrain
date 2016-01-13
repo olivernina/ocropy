@@ -12,6 +12,8 @@ from ocrolib import lineest
 import ocrolib.lstm as lstm
 import traceback
 
+from skimage import transform as tf
+
 numpy.seterr(divide='raise',over='raise',invalid='raise',under='ignore')
 
 parser = argparse.ArgumentParser("train an RNN recognizer")
@@ -260,7 +262,13 @@ for trial in range(start,args.ntrain):
     base,_ = ocrolib.allsplitext(fname)
     try:
         line = ocrolib.read_image_gray(fname)
-        transcript = ocrolib.read_text(base+".gt.txt")
+
+        afine_tf = tf.AffineTransform(shear=0.5)
+        line = tf.warp(line,afine_tf)
+
+
+        base = base.replace('Images/Lines','Transcriptions')
+        transcript = ocrolib.read_text(base+".txt")
     except IOError as e:
         print "ERROR",e
         continue
@@ -311,6 +319,7 @@ for trial in range(start,args.ntrain):
 
     if do_display:
         figure("training",figsize=(1400//75,800//75),dpi=75)
+
         clf()
         gcf().canvas.set_window_title(args.output)
         plot_network_info(network,transcript,pred,gta)
