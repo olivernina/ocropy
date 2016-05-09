@@ -16,6 +16,12 @@ trace by default since it seems to confuse too many users).
 Installing
 ----------
 
+Easy install:
+
+run the install.sh bash script provided in the code. This scripot assumes you have anaconda installed and have an environement created call ocrenv. If you don't have this on your system you might want to create it by uncommenting the first line in the script. 
+
+This script should take care of dependencies, etc. 
+
 [![Join the chat at https://gitter.im/tmbdev/ocropy](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/tmbdev/ocropy?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
 To install OCRopus dependencies system-wide:
