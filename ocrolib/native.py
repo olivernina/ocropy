@@ -10,6 +10,7 @@ import ctypes
 import time
 import errno
 import contextlib
+import platform
 
 @contextlib.contextmanager
 def lockfile(fname,delay=0.5):
@@ -42,6 +43,10 @@ class CompileError(Exception):
 
 def compile_and_find(c_string,prefix=".pynative",opt="-g -O4",libs="-lm",
                      options="-shared -fopenmp -std=c99 -fPIC",verbose=0):
+
+    if platform.system()=='Darwin': #for compiling in mac
+        options="-shared -openmp -std=c99 -fPIC"
+
     if not os.path.exists(prefix):
         os.mkdir(prefix)
     m = hashlib.md5()

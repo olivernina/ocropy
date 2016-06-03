@@ -72,6 +72,12 @@ parser.add_argument("-p","--pad",type=int,default=16)
 parser.add_argument("files",nargs="*")
 args = parser.parse_args()
 
+# grad_check_vocab_size = 1
+# np.random.seed(10)
+# model = lstm.RNNNumpy(grad_check_vocab_size, 10,1, bptt_truncate=1000)
+# model.gradient_check([0,1,2,3], [1,2,3,4])
+
+
 inputs = ocrolib.glob_all(args.files)
 if len(inputs)==0:
     parser.print_help()
@@ -186,7 +192,10 @@ if args.load:
     network = load_lstm(args.load)
 else:
     last_save = None
-    network = lstm.SeqRecognizer(args.height,args.hiddensize,
+    # network = lstm.SeqRecognizer(args.height,args.hiddensize,
+    #     codec=codec,
+    #     normalize=lstm.normalize_nfkc)
+    network = lstm.SeqRecognizerTheano(args.height,args.hiddensize,
         codec=codec,
         normalize=lstm.normalize_nfkc)
     if args.clstm:
@@ -263,12 +272,12 @@ for trial in range(start,args.ntrain):
     try:
         line = ocrolib.read_image_gray(fname)
 
-        afine_tf = tf.AffineTransform(shear=0.5)
-        line = tf.warp(line,afine_tf)
+        # afine_tf = tf.AffineTransform(shear=0.5)
+        # line = tf.warp(line,afine_tf)
 
 
         base = base.replace('Images/Lines','Transcriptions')
-        transcript = ocrolib.read_text(base+".txt")
+        transcript = ocrolib.read_text(base+".gt.txt")
     except IOError as e:
         print "ERROR",e
         continue

@@ -34,6 +34,13 @@ import unicodedata
 
 initial_range = 0.1
 
+
+import numpy as np
+import theano as theano
+import theano.tensor as T
+# from utils import *
+import operator
+
 class RangeError(Exception):
     def __init__(self,s=None):
         Exception.__init__(self,s)
@@ -212,17 +219,25 @@ class Network:
         return concatenate(weights),concatenate(derivs)
 
     def update(self):
-        """Update the weights using the deltas computed in the last forward/backward pass.
-        Subclasses need not implement this, they should implement the `weights` method."""
-        if not hasattr(self,"verbose"):
-            self.verbose = 0
-        if not hasattr(self,"deltas") or self.deltas is None:
-            self.deltas = [zeros(dw.shape) for w,dw,n in self.weights()]
-        for ds,(w,dw,n) in zip(self.deltas,self.weights()):
-            ds.ravel()[:] = self.momentum * ds.ravel()[:] + self.learning_rate * dw.ravel()[:]
-            w.ravel()[:] += ds.ravel()[:]
-            if self.verbose:
-                print n,(amin(w),amax(w)),(amin(dw),amax(dw))
+        # """Update the weights using the deltas computed in the last forward/backward pass.
+        # Subclasses need not implement this, they should implement the `weights` method."""
+        # if not hasattr(self,"verbose"):
+        #     self.verbose = 0
+        # if not hasattr(self,"deltas") or self.deltas is None:
+        #     self.deltas = [zeros(dw.shape) for w,dw,n in self.weights()]
+        # for ds,(w,dw,n) in zip(self.deltas,self.weights()):
+        #     ds.ravel()[:] = self.momentum * ds.ravel()[:] + self.learning_rate * dw.ravel()[:]
+        #     w.ravel()[:] += ds.ravel()[:]
+        #     if self.verbose:
+        #         print n,(amin(w),amax(w)),(amin(dw),amax(dw))
+
+        # def numpy_sdg_step(self, x, y, learning_rate):
+        # Calculate the gradients
+        dLdU, dLdV, dLdW = self.deltas
+        # Change parameters according to gradients and learning rate
+        self.U -= self.learning_rate * dLdU
+        self.V -= self.learning_rate * dLdV
+        self.W -= self.learning_rate * dLdW
 
 ''' The following are subclass responsibility:
 
@@ -393,6 +408,10 @@ def hprime(x,y=None):
     "Derivative of nonlinearity used for output."
     if y is None: y = tanh(x)
     return 1-y**2
+
+def softmax(x):
+    xt = np.exp(x - np.max(x))
+    return xt / np.sum(xt)
 
 # These two routines have been factored out of the class in order to
 # make their conversion to native code easy; these are the "inner loops"
@@ -581,6 +600,251 @@ class LSTM(Network):
                     self.DWGI,self.DWGF,self.DWGO,self.DWCI,
                     self.DWIP,self.DWFP,self.DWOP)
         return [s[1:1+ni] for s in self.sourceerr[:n]]
+
+
+
+class RNNNumpy(Network):
+    def __init__(self, word_dim, hidden_dim=100,noutputs=-1, bptt_truncate=4):
+        # Assign instance variables
+        self.word_dim = word_dim
+        self.hidden_dim = hidden_dim
+        self.noutputs= noutputs
+        self.bptt_truncate = bptt_truncate
+        na = 1+word_dim+hidden_dim
+        self.dims = word_dim,hidden_dim,na
+        # Randomly initialize the network parameters
+        self.U = np.random.uniform(-np.sqrt(1./word_dim), np.sqrt(1./word_dim), (hidden_dim, word_dim))
+        self.V = np.random.uniform(-np.sqrt(1./hidden_dim), np.sqrt(1./hidden_dim), (noutputs, hidden_dim))
+        self.W = np.random.uniform(-np.sqrt(1./hidden_dim), np.sqrt(1./hidden_dim), (hidden_dim, hidden_dim))
+
+    def forward(self, x):
+        # The total number of time steps
+        T = len(x)
+        # During forward propagation we save all hidden states in s because need them later.
+        # We add one additional element for the initial hidden, which we set to 0
+        self.state = np.zeros((T + 1, self.hidden_dim))
+        self.state[-1] = np.zeros(self.hidden_dim)
+        self.x = x
+        # The outputs at each time step. Again, we save them for later.
+        o = np.zeros((T, self.noutputs))
+
+        # o = np.zeros((T, 156))
+        # For each time step...
+        for t in np.arange(T):
+            # Note that we are indxing U by x[t]. This is the same as multiplying U with a one-hot vector.
+            self.state[t] = np.tanh(self.U.dot(x[t]) + self.W.dot(self.state[t-1]))
+            o[t] = softmax(self.V.dot(self.state[t]))
+        # return [o, s]
+        return o
+
+    def predict(self, x):
+        # Perform forward propagation and return index of the highest score
+        o, s = self.forward(x)
+        return np.argmax(o, axis=1)
+
+    def calculate_total_loss(self, x, y):
+        L = 0
+        # For each sentence...
+        for i in np.arange(len(y)):
+            o, s = self.forward(x[i])
+            # We only care about our prediction of the "correct" words
+            correct_word_predictions = o[np.arange(len(y[i])), y[i]]
+            # Add to the loss based on how off we were
+            L += -1 * np.sum(np.log(correct_word_predictions))
+        return L
+
+    def calculate_loss(self, x, y):
+        # Divide the total loss by the number of training examples
+        N = np.sum((len(y_i) for y_i in y))
+        return self.calculate_total_loss(x,y)/N
+
+    def backward(self,deltas):
+        """Perform backward propagation of deltas. Must be called after `forward`.
+        Does not perform weight updating (for that, use the generic `update` method).
+        Returns the `deltas` for the input vectors."""
+        ni,ns,na = self.dims
+        n = len(deltas)
+        self.last_n = n
+        # N = len(self.gi)
+        # if n>N: raise ocrolib.RecognitionError("input too large for LSTM model")
+        # backward_py(n,N,ni,ns,na,deltas,
+        #             self.source,
+        #             self.gix,self.gfx,self.gox,self.cix,
+        #             self.gi,self.gf,self.go,self.ci,
+        #             self.state,self.output,
+        #             self.WGI,self.WGF,self.WGO,self.WCI,
+        #             self.WIP,self.WFP,self.WOP,
+        #             self.sourceerr,
+        #             self.gierr,self.gferr,self.goerr,self.cierr,
+        #             self.stateerr,self.outerr,
+        #             self.DWGI,self.DWGF,self.DWGO,self.DWCI,
+        #             self.DWIP,self.DWFP,self.DWOP)
+
+        dLdU = np.zeros(self.U.shape)
+        dLdV = np.zeros(self.V.shape)
+        dLdW = np.zeros(self.W.shape)
+        # delta_o = o
+        # delta_o[np.arange(len(y)), y] -= 1.
+        # For each output backwards...
+        # for t in reversed(range(n)):
+        for t in np.arange(n)[::-1]:
+            dLdV += np.outer(deltas[t], self.state[t].T)
+            # Initial delta calculation
+            delta_t = self.V.T.dot(deltas[t]) * (1 - (self.state[t] ** 2))
+            # Backpropagation through time (for at most self.bptt_truncate steps)
+            for bptt_step in np.arange(max(0, t-self.bptt_truncate), t+1)[::-1]:
+                # print "Backpropagation step t=%d bptt step=%d " % (t, bptt_step)
+                dLdW += np.outer(delta_t, self.state[bptt_step-1])
+                dLdU += np.outer(delta_t, self.x[bptt_step])
+                # dLdU[:,self.x[bptt_step]] += delta_t
+                # Update delta for next step
+                delta_t = self.W.T.dot(delta_t) * (1 - self.state[bptt_step-1] ** 2)
+        self.deltas = [dLdU, dLdV, dLdW]
+        return self.deltas
+        # return [s[1:1+ni] for s in self.sourceerr[:n]]
+
+
+
+    def bptt(self, x, y):
+        T = len(y)
+        # Perform forward propagation
+        o, s = self.forward(x)
+        # We accumulate the gradients in these variables
+        dLdU = np.zeros(self.U.shape)
+        dLdV = np.zeros(self.V.shape)
+        dLdW = np.zeros(self.W.shape)
+        delta_o = o
+        delta_o[np.arange(len(y)), y] -= 1.
+        # For each output backwards...
+        for t in np.arange(T)[::-1]:
+            dLdV += np.outer(delta_o[t], s[t].T)
+            # Initial delta calculation
+            delta_t = self.V.T.dot(delta_o[t]) * (1 - (s[t] ** 2))
+            # Backpropagation through time (for at most self.bptt_truncate steps)
+            for bptt_step in np.arange(max(0, t-self.bptt_truncate), t+1)[::-1]:
+                # print "Backpropagation step t=%d bptt step=%d " % (t, bptt_step)
+                dLdW += np.outer(delta_t, s[bptt_step-1])
+                dLdU[:,x[bptt_step]] += delta_t
+                # Update delta for next step
+                delta_t = self.W.T.dot(delta_t) * (1 - s[bptt_step-1] ** 2)
+        return [dLdU, dLdV, dLdW]
+
+    def gradient_check(self, x, y, h=0.001, error_threshold=0.01):
+        # Calculate the gradients using backpropagation. We want to checker if these are correct.
+        bptt_gradients = self.bptt(x, y)
+        # List of all parameters we want to check.
+        model_parameters = ['U', 'V', 'W']
+        # Gradient check for each parameter
+        for pidx, pname in enumerate(model_parameters):
+            # Get the actual parameter value from the mode, e.g. model.W
+            parameter = operator.attrgetter(pname)(self)
+            print "Performing gradient check for parameter %s with size %d." % (pname, np.prod(parameter.shape))
+            # Iterate over each element of the parameter matrix, e.g. (0,0), (0,1), ...
+            it = np.nditer(parameter, flags=['multi_index'], op_flags=['readwrite'])
+            while not it.finished:
+                ix = it.multi_index
+                # Save the original value so we can reset it later
+                original_value = parameter[ix]
+                # Estimate the gradient using (f(x+h) - f(x-h))/(2*h)
+                parameter[ix] = original_value + h
+                gradplus = self.calculate_total_loss([x],[y])
+                parameter[ix] = original_value - h
+                gradminus = self.calculate_total_loss([x],[y])
+                estimated_gradient = (gradplus - gradminus)/(2*h)
+                # Reset parameter to original value
+                parameter[ix] = original_value
+                # The gradient for this parameter calculated using backpropagation
+                backprop_gradient = bptt_gradients[pidx][ix]
+                # calculate The relative error: (|x - y|/(|x| + |y|))
+                if backprop_gradient==0:
+                    it.iternext()
+                    continue
+                relative_error = np.abs(backprop_gradient - estimated_gradient)/(np.abs(backprop_gradient) + np.abs(estimated_gradient))
+                # If the error is to large fail the gradient check
+                if relative_error > error_threshold:
+                    print "Gradient Check ERROR: parameter=%s ix=%s" % (pname, ix)
+                    print "+h Loss: %f" % gradplus
+                    print "-h Loss: %f" % gradminus
+                    print "Estimated_gradient: %f" % estimated_gradient
+                    print "Backpropagation gradient: %f" % backprop_gradient
+                    print "Relative Error: %f" % relative_error
+                    return
+                it.iternext()
+            print "Gradient check for parameter %s passed." % (pname)
+
+
+
+class RNNTheano:
+
+    def __init__(self, word_dim, hidden_dim=100,noutputs=1, bptt_truncate=4):
+        # Assign instance variables
+        self.word_dim = word_dim
+        self.hidden_dim = hidden_dim
+        self.bptt_truncate = bptt_truncate
+        # Randomly initialize the network parameters
+        U = np.random.uniform(-np.sqrt(1./word_dim), np.sqrt(1./word_dim), (hidden_dim, word_dim))
+        V = np.random.uniform(-np.sqrt(1./hidden_dim), np.sqrt(1./hidden_dim), (self.noutputs, hidden_dim))
+        W = np.random.uniform(-np.sqrt(1./hidden_dim), np.sqrt(1./hidden_dim), (hidden_dim, hidden_dim))
+        # Theano: Created shared variables
+        self.U = theano.shared(name='U', value=U.astype(theano.config.floatX))
+        self.V = theano.shared(name='V', value=V.astype(theano.config.floatX))
+        self.W = theano.shared(name='W', value=W.astype(theano.config.floatX))
+        # We store the Theano graph here
+        self.theano = {}
+        self.__theano_build__()
+
+    def __theano_build__(self):
+        U, V, W = self.U, self.V, self.W
+        x = T.ivector('x')
+        y = T.ivector('y')
+        def forward_prop_step(x_t, s_t_prev, U, V, W):
+            s_t = T.tanh(U[:,x_t] + W.dot(s_t_prev))
+            o_t = T.nnet.softmax(V.dot(s_t))
+            return [o_t[0], s_t]
+        [o,s], updates = theano.scan(
+            forward_prop_step,
+            sequences=x,
+            outputs_info=[None, dict(initial=T.zeros(self.hidden_dim))],
+            non_sequences=[U, V, W],
+            truncate_gradient=self.bptt_truncate,
+            strict=True)
+
+        # prediction = T.argmax(o, axis=1)
+        # o_error = T.sum(T.nnet.categorical_crossentropy(o, y))
+
+        self.outputs = array(o)
+        # CTC alignment
+        self.targets = array(make_target(self.cs,self.No))
+        self.aligned = array(ctc_align_targets(self.outputs,self.targets,debug=self.debug_align))
+        # propagate the deltas back
+        deltas = self.aligned-self.outputs
+
+
+        # Gradients
+        dU = T.grad(deltas, U)
+        dV = T.grad(deltas, V)
+        dW = T.grad(deltas, W)
+
+        # Assign functions
+        self.forward = theano.function([x], o)
+        # self.predict = theano.function([x], prediction)
+        self.ce_error = theano.function([x, y], deltas)
+        self.backward = theano.function([x,y], [dU, dV, dW])
+
+        # SGD
+        learning_rate = T.scalar('learning_rate')
+        self.sgd_step = theano.function([x,y,learning_rate], [],
+                      updates=[(self.U, self.U - learning_rate * dU),
+                              (self.V, self.V - learning_rate * dV),
+                              (self.W, self.W - learning_rate * dW)])
+
+    def calculate_total_loss(self, X, Y):
+        return np.sum([self.ce_error(x,y) for x,y in zip(X,Y)])
+
+    def calculate_loss(self, X, Y):
+        # Divide calculate_loss by the number of words
+        num_words = np.sum([len(y) for y in Y])
+        return self.calculate_total_loss(X,Y)/float(num_words)
 
 ################################################################
 # combination classifiers
@@ -852,6 +1116,97 @@ class SeqRecognizer:
         assert noutput>0
         self.No = noutput
         self.lstm = BIDILSTM(ninput,nstates,noutput)
+        self.setLearningRate(1e-4)
+        self.debug_align = 0
+        self.normalize = normalize
+        self.codec = codec
+        self.clear_log()
+    def walk(self):
+        for x in self.lstm.walk(): yield x
+    def clear_log(self):
+        self.command_log = []
+        self.error_log = []
+        self.cerror_log = []
+        self.key_log = []
+    def __setstate__(self,state):
+        self.__dict__.update(state)
+        self.upgrade()
+    def upgrade(self):
+        if "last_trial" not in dir(self): self.last_trial = 0
+        if "command_log" not in dir(self): self.command_log = []
+        if "error_log" not in dir(self): self.error_log = []
+        if "cerror_log" not in dir(self): self.cerror_log = []
+        if "key_log" not in dir(self): self.key_log = []
+    def info(self):
+        self.net.info()
+    def setLearningRate(self,r,momentum=0.9):
+        self.lstm.setLearningRate(r,momentum)
+    def predictSequence(self,xs):
+        "Predict an integer sequence of codes."
+        assert xs.shape[1]==self.Ni,\
+            "wrong image height (image: %d, expected: %d)"%(xs.shape[1],self.Ni)
+        self.outputs = array(self.lstm.forward(xs))
+        return translate_back(self.outputs)
+    def trainSequence(self,xs,cs,update=1,key=None):
+        "Train with an integer sequence of codes."
+        assert xs.shape[1]==self.Ni,"wrong image height"
+        # forward step
+        self.outputs = array(self.lstm.forward(xs))
+        # CTC alignment
+        self.targets = array(make_target(cs,self.No))
+        self.aligned = array(ctc_align_targets(self.outputs,self.targets,debug=self.debug_align))
+        # propagate the deltas back
+        deltas = self.aligned-self.outputs
+        self.lstm.backward(deltas)
+        if update: self.lstm.update()
+        # translate back into a sequence
+        result = translate_back(self.outputs)
+        # compute least square error
+        self.error = sum(deltas**2)
+        self.error_log.append(self.error**.5/len(cs))
+        # compute class error
+        self.cerror = edist.levenshtein(cs,result)
+        self.cerror_log.append((self.cerror,len(cs)))
+        # training keys
+        self.key_log.append(key)
+        return result
+    # we keep track of errors within the object; this even gets
+    # saved to give us some idea of the training history
+    def errors(self,range=10000,smooth=0):
+        result = self.error_log[-range:]
+        if smooth>0: result = filters.gaussian_filter(result,smooth,mode='mirror')
+        return result
+    def cerrors(self,range=10000,smooth=0):
+        result = [e*1.0/max(1,n) for e,n in self.cerror_log[-range:]]
+        if smooth>0: result = filters.gaussian_filter(result,smooth,mode='mirror')
+        return result
+
+    def s2l(self,s):
+        "Convert a unicode sequence into a code sequence for training."
+        s = self.normalize(s)
+        s = [c for c in s]
+        return self.codec.encode(s)
+    def l2s(self,l):
+        "Convert a code sequence into a unicode string after recognition."
+        l = self.codec.decode(l)
+        return u"".join(l)
+    def trainString(self,xs,s,update=1):
+        "Perform training with a string. This uses the codec and normalizer."
+        return self.trainSequence(xs,self.s2l(s),update=update)
+    def predictString(self,xs):
+        "Predict output as a string. This uses codec and normalizer."
+        cs = self.predictSequence(xs)
+        return self.l2s(cs)
+
+
+class SeqRecognizerTheano:
+    """Perform sequence recognition using BIDILSTM and alignment."""
+    def __init__(self,ninput,nstates,noutput=-1,codec=None,normalize=normalize_nfkc):
+        self.Ni = ninput
+        if codec: noutput = codec.size()
+        assert noutput>0
+        self.No = noutput
+        self.lstm = RNNTheano(ninput,nstates,noutput)
         self.setLearningRate(1e-4)
         self.debug_align = 0
         self.normalize = normalize
